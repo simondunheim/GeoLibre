@@ -31,6 +31,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { ContextMenuGestureTracker, type ContextMenuRequest } from "../../lib/context-menu-gesture";
+import { isValidPosition, pointAsGeoJson, wrapMapLongitude } from "../../lib/coordinate-inspector";
 import { googleEarthUrl, googleMapsUrl } from "../../lib/external-map-links";
 import { openExternalLink } from "../../lib/open-external";
 import {
@@ -45,8 +46,10 @@ import {
 } from "../../lib/quick-analysis";
 import { useLineOfSightTool } from "../../lib/line-of-sight-store";
 import { useNavigationTool } from "../../lib/navigation/store";
+import { notify } from "../../lib/notify";
 import { hasRoutingConsent, recordRoutingConsent } from "../../lib/routing-consent";
 import { runViewshed } from "../../lib/run-viewshed";
+import { CoordinateInspectorMenu } from "./CoordinateInspectorMenu";
 import { RoutingConsentDialog } from "./RoutingConsentDialog";
 
 interface ContextMenuState {
@@ -81,7 +84,7 @@ async function copyText(value: string): Promise<void> {
     document.body.appendChild(textarea);
     textarea.select();
     try {
-      document.execCommand("copy");
+      if (!document.execCommand("copy")) throw new Error("Clipboard copy failed");
     } finally {
       document.body.removeChild(textarea);
     }
@@ -199,20 +202,38 @@ export function MapContextMenu({
     };
   }, [mapControllerRef, mapReadyGeneration]);
 
+  const copyWithFeedback = useCallback(
+    (value: string, confirmation: string) => {
+      void copyText(value).then(
+        () => notify.success(confirmation),
+        () => notify.error(t("mapContextMenu.coordinateInspector.copyFailed")),
+      );
+    },
+    [t],
+  );
+
+  const copyInspectedCoords = useCallback(
+    (value: string) => copyWithFeedback(value, t("mapContextMenu.coordinateInspector.copied")),
+    [copyWithFeedback, t],
+  );
+
+  const inspectorLongitude = wrapMapLongitude(menu?.lng ?? NaN);
+  const validPoint = !!menu && isValidPosition(inspectorLongitude, menu.lat);
+
   const copyCoords = useCallback(() => {
-    if (!menu) return;
-    void copyText(formatCoords(menu.lat, menu.lng));
-  }, [menu]);
+    if (menu && validPoint) copyInspectedCoords(formatCoords(menu.lat, menu.lng));
+  }, [menu, validPoint, copyInspectedCoords]);
 
   const copyGeoJson = useCallback(() => {
     if (!menu) return;
-    const feature = {
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [menu.lng, menu.lat] },
-      properties: {},
-    };
-    void copyText(JSON.stringify(feature, null, 2));
-  }, [menu]);
+    const feature = pointAsGeoJson(inspectorLongitude, menu.lat);
+    if (feature) {
+      copyWithFeedback(
+        JSON.stringify(feature, null, 2),
+        t("mapContextMenu.coordinateInspector.geoJsonCopied"),
+      );
+    }
+  }, [menu, inspectorLongitude, copyWithFeedback, t]);
 
   const centerHere = useCallback(() => {
     if (!menu) return;
@@ -465,6 +486,7 @@ export function MapContextMenu({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" side="bottom" className="w-64">
           <DropdownMenuItem
+            disabled={!validPoint}
             onSelect={copyCoords}
             className="gap-2 font-mono text-xs"
             title={t("mapContextMenu.copyCoordinatesHint")}
@@ -472,6 +494,13 @@ export function MapContextMenu({
             <MapPin className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <span className="truncate">{menu ? formatCoords(menu.lat, menu.lng) : ""}</span>
           </DropdownMenuItem>
+          {menu && (
+            <CoordinateInspectorMenu
+              lng={inspectorLongitude}
+              lat={menu.lat}
+              onCopy={copyInspectedCoords}
+            />
+          )}
           <DropdownMenuSeparator />
           <DropdownMenuLabel className="text-xs text-muted-foreground">
             {t("mapContextMenu.quickActions")}
@@ -482,7 +511,7 @@ export function MapContextMenu({
               {t("mapContextMenu.whatsHere")}
             </DropdownMenuItem>
           ) : null}
-          <DropdownMenuItem onSelect={copyGeoJson} className="gap-2">
+          <DropdownMenuItem disabled={!validPoint} onSelect={copyGeoJson} className="gap-2">
             <Braces className="h-4 w-4 shrink-0 text-muted-foreground" />
             {t("mapContextMenu.copyGeoJson")}
           </DropdownMenuItem>
